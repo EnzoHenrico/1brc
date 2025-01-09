@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sort"
 	"strconv"
 	"time"
 )
@@ -20,6 +21,8 @@ type stationData struct {
 func main() {
 	start := time.Now()
 	file, err := os.Open("/home/enzohenrico/1brc/measurements.txt")
+	//file, err := os.Open("test_data.txt")
+
 	if err != nil {
 		fmt.Println("Error opening file:", err)
 		return
@@ -29,6 +32,8 @@ func main() {
 	reader := bufio.NewReader(file)
 
 	stationsMap := make(map[string]*stationData)
+	var keysList []string
+	keyListLen := 0
 
 	for {
 		line, err := reader.ReadString('\n')
@@ -42,15 +47,10 @@ func main() {
 		name, temp := parseLine(line)
 
 		station, ok := stationsMap[name]
-
 		if !ok {
-			stationsMap[name] = &stationData{
-				min:   temp,
-				max:   temp,
-				med:   temp,
-				acc:   temp,
-				count: 1,
-			}
+			stationsMap[name] = &stationData{temp, temp, temp, temp, 1}
+			keysList = append(keysList, name)
+			keyListLen++
 		} else {
 			if temp < station.min {
 				station.min = temp
@@ -62,34 +62,40 @@ func main() {
 			station.acc += temp
 		}
 	}
+	parseTime := time.Since(start)
 
-	for key, data := range stationsMap {
-		med := data.acc / float32(data.count)
-		fmt.Println(key, data.min, med, data.max)
+	startSort := time.Now()
+	sort.Strings(keysList)
+	sortTime := time.Since(startSort)
+
+	startPrinting := time.Now()
+	for i := 0; i < keyListLen; i++ {
+		data := stationsMap[keysList[i]]
+		fmt.Println(keysList[i], data.min, data.acc/float32(data.count), data.max)
 	}
-	fmt.Println(time.Since(start))
+	printingTime := time.Since(startPrinting)
+
+	fmt.Println("\nParse Time : ", parseTime)
+	fmt.Println("Sort Time : ", sortTime)
+	fmt.Println("Printing Time : ", printingTime)
+	fmt.Println("Total Time : ", time.Since(start))
 }
 
 func parseLine(line string) (string, float32) {
-	isWritingName := true
-	isWritingTemp := false
-	stationName := ""
-	temperature := ""
+	var splitIndex int
+	lineLength := len(line)
 
-	for _, b := range []rune(line) {
-		if b == ';' || b == '\n' {
-			isWritingName = false
-			isWritingTemp = true
-			continue
-		}
-		if isWritingName {
-			stationName += string(b)
-		}
-		if isWritingTemp {
-			temperature += string(b)
+	for i := 0; i < lineLength; i++ {
+		if line[i] == ';' {
+			splitIndex = i
+			break
 		}
 	}
-	tempFloat, _ := strconv.ParseFloat(temperature, 32)
+
+	stationName := line[0:splitIndex]
+	tempString := line[splitIndex+1 : lineLength-1]
+
+	tempFloat, _ := strconv.ParseFloat(tempString, 32)
 
 	return stationName, float32(tempFloat)
 }
