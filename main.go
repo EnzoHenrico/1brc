@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"runtime"
 	"sort"
 	"strconv"
 	"time"
@@ -20,8 +21,11 @@ type stationData struct {
 
 func main() {
 	start := time.Now()
-	file, err := os.Open("/home/enzohenrico/1brc/measurements.txt")
 	//file, err := os.Open("test_data.txt")
+	file, err := os.Open("/home/enzohenrico/1brc/measurements.txt")
+
+	countCPUs := runtime.NumCPU()
+	fmt.Println("CPUs:", countCPUs)
 
 	if err != nil {
 		fmt.Println("Error opening file:", err)
