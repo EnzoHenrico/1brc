@@ -31,33 +31,6 @@ const (
 	testPath = "test_data.txt"
 )
 
-func worker(requests <-chan workerRequest, wg *sync.WaitGroup, mu *sync.Mutex) {
-	defer wg.Done()
-	for r := range requests {
-		name, temp := ParseLine(r.line)
-		mu.Lock()
-		station, ok := r.stationsMap[name]
-		mu.Unlock()
-		if !ok {
-			mu.Lock()
-			r.stationsMap[name] = &stationData{temp, temp, temp, temp, 1}
-			*r.keysList = append(*r.keysList, name)
-			mu.Unlock()
-		} else {
-			mu.Lock()
-			if temp < station.min {
-				station.min = temp
-			}
-			if temp > station.max {
-				station.max = temp
-			}
-			station.count++
-			station.acc += temp
-			mu.Unlock()
-		}
-	}
-}
-
 func main() {
 	start := time.Now()
 	countCPUs := runtime.NumCPU()
@@ -67,11 +40,36 @@ func main() {
 	var mu sync.Mutex
 
 	stationsMap := make(map[string]*stationData)
-	channel := make(chan workerRequest)
+	channel := make(chan string)
 
 	for i := 0; i < countCPUs; i++ {
 		wg.Add(1)
-		go worker(channel, &wg, &mu)
+		go func(lines <-chan string) {
+			defer wg.Done()
+			for line := range lines {
+				name, temp := ParseLine(line)
+				mu.Lock()
+				station, ok := stationsMap[name]
+				mu.Unlock()
+				if !ok {
+					mu.Lock()
+					stationsMap[name] = &stationData{temp, temp, temp, temp, 1}
+					keysList = append(keysList, name)
+					mu.Unlock()
+				} else {
+					mu.Lock()
+					if temp < station.min {
+						station.min = temp
+					}
+					if temp > station.max {
+						station.max = temp
+					}
+					station.count++
+					station.acc += temp
+					mu.Unlock()
+				}
+			}
+		}(channel)
 	}
 
 	file, err := os.Open(testPath)
@@ -96,11 +94,7 @@ func main() {
 			fmt.Println("Error reading line:", err)
 			return
 		}
-		channel <- workerRequest{
-			line,
-			stationsMap,
-			&keysList,
-		}
+		channel <- line
 	}
 
 	close(channel)
