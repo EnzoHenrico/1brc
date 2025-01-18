@@ -12,7 +12,7 @@ import (
 	"time"
 )
 
-type StationData struct {
+type stationData struct {
 	min   float32
 	max   float32
 	med   float32
@@ -20,33 +20,40 @@ type StationData struct {
 	count int
 }
 
-type SafeMap struct {
-	mu sync.Mutex
-	mp map[string]*StationData
-}
-
-type WorkerRequest struct {
-	name        string
-	temp        float32
-	stationsMap *SafeMap
+type workerRequest struct {
+	line        string
+	stationsMap map[string]*stationData
 	keysList    *[]string
 }
 
 const (
 	path     = "/home/enzohenrico/1brc/measurements.txt"
 	testPath = "test_data.txt"
-	billion  = 1000000000
 )
 
-func worker(requests <-chan WorkerRequest, wg *sync.WaitGroup) {
+func worker(requests <-chan workerRequest, wg *sync.WaitGroup, mu *sync.Mutex) {
 	defer wg.Done()
 	for r := range requests {
-		station, ok := r.stationsMap.read(r.name)
+		name, temp := ParseLine(r.line)
+		mu.Lock()
+		station, ok := r.stationsMap[name]
+		mu.Unlock()
 		if !ok {
-			r.stationsMap.write(r.name, &StationData{r.temp, r.temp, r.temp, r.temp, 1})
-			*r.keysList = append(*r.keysList, r.name)
+			mu.Lock()
+			r.stationsMap[name] = &stationData{temp, temp, temp, temp, 1}
+			*r.keysList = append(*r.keysList, name)
+			mu.Unlock()
 		} else {
-			r.stationsMap.update(r.temp, station)
+			mu.Lock()
+			if temp < station.min {
+				station.min = temp
+			}
+			if temp > station.max {
+				station.max = temp
+			}
+			station.count++
+			station.acc += temp
+			mu.Unlock()
 		}
 	}
 }
@@ -54,18 +61,17 @@ func worker(requests <-chan WorkerRequest, wg *sync.WaitGroup) {
 func main() {
 	start := time.Now()
 	countCPUs := runtime.NumCPU()
-	runtime.GOMAXPROCS(countCPUs)
 
 	var keysList []string
 	var wg sync.WaitGroup
+	var mu sync.Mutex
 
-	stationsMap := SafeMap{mp: make(map[string]*StationData)}
-	keyListLen := 0
-	channel := make(chan WorkerRequest)
+	stationsMap := make(map[string]*stationData)
+	channel := make(chan workerRequest)
 
 	for i := 0; i < countCPUs; i++ {
 		wg.Add(1)
-		go worker(channel, &wg)
+		go worker(channel, &wg, &mu)
 	}
 
 	file, err := os.Open(testPath)
@@ -81,9 +87,7 @@ func main() {
 	}(file)
 
 	reader := bufio.NewReader(file)
-	lineIndex := 0
 	for {
-		lineIndex++
 		line, err := reader.ReadString('\n')
 		if err != nil {
 			if err == io.EOF {
@@ -92,14 +96,11 @@ func main() {
 			fmt.Println("Error reading line:", err)
 			return
 		}
-		name, temp := parseLine(line)
-		request := WorkerRequest{
-			name,
-			temp,
-			&stationsMap,
+		channel <- workerRequest{
+			line,
+			stationsMap,
 			&keysList,
 		}
-		channel <- request
 	}
 
 	close(channel)
@@ -112,8 +113,8 @@ func main() {
 	sortTime := time.Since(startSort)
 
 	startPrinting := time.Now()
-	for i := 0; i < keyListLen; i++ {
-		data := stationsMap.mp[keysList[i]]
+	for i := 0; i < len(keysList); i++ {
+		data := stationsMap[keysList[i]]
 		fmt.Println(keysList[i], data.min, data.acc/float32(data.count), data.max)
 	}
 	printingTime := time.Since(startPrinting)
@@ -124,7 +125,7 @@ func main() {
 	fmt.Println("Total Time : ", time.Since(start))
 }
 
-func parseLine(line string) (string, float32) {
+func ParseLine(line string) (string, float32) {
 	var splitIndex int
 	lineLength := len(line)
 
@@ -141,30 +142,4 @@ func parseLine(line string) (string, float32) {
 	tempFloat, _ := strconv.ParseFloat(tempString, 32)
 
 	return stationName, float32(tempFloat)
-}
-
-func (s *SafeMap) read(name string) (*StationData, bool) {
-	s.mu.Lock()
-	data, ok := s.mp[name]
-	s.mu.Unlock()
-	return data, ok
-}
-
-func (s *SafeMap) write(name string, stationData *StationData) {
-	s.mu.Lock()
-	s.mp[name] = stationData
-	s.mu.Unlock()
-}
-
-func (s *SafeMap) update(temp float32, station *StationData) {
-	s.mu.Lock()
-	if temp < station.min {
-		station.min = temp
-	}
-	if temp > station.max {
-		station.max = temp
-	}
-	station.count++
-	station.acc += temp
-	s.mu.Unlock()
 }
