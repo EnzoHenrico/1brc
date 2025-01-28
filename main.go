@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"runtime"
 	"sort"
@@ -20,59 +21,56 @@ type stationData struct {
 	count int
 }
 
-type workerRequest struct {
-	line        string
-	stationsMap map[string]*stationData
-	keysList    *[]string
-}
-
 const (
-	path     = "/home/enzohenrico/1brc/measurements.txt"
-	testPath = "test_data.txt"
+	mainPath    = "/home/enzohenrico/1brc/measurements.txt"
+	testPath    = "test_data.txt"
+	billion     = 1000000000
+	twoMillions = 2000000
 )
 
 func main() {
+	path := testPath
+	totalSize := twoMillions
+
 	start := time.Now()
 	countCPUs := runtime.NumCPU()
+	chunkMaxSize := int(math.Floor(float64(totalSize) / float64(countCPUs)))
 
+	var mapsSlice []map[string]*stationData
 	var keysList []string
 	var wg sync.WaitGroup
-	var mu sync.Mutex
 
-	stationsMap := make(map[string]*stationData)
-	channel := make(chan string)
+	chunks := make(chan []string, countCPUs)
+	mainMap := make(map[string]*stationData)
 
 	for i := 0; i < countCPUs; i++ {
 		wg.Add(1)
-		go func(lines <-chan string) {
+		stationsMap := make(map[string]*stationData)
+		go func(workerID int, ch <-chan []string) {
 			defer wg.Done()
-			for line := range lines {
-				name, temp := ParseLine(line)
-				mu.Lock()
-				station, ok := stationsMap[name]
-				mu.Unlock()
-				if !ok {
-					mu.Lock()
-					stationsMap[name] = &stationData{temp, temp, temp, temp, 1}
-					keysList = append(keysList, name)
-					mu.Unlock()
-				} else {
-					mu.Lock()
-					if temp < station.min {
-						station.min = temp
+			for chunk := range chunks {
+				for i := 0; i < len(chunk); i++ {
+					name, temp := ParseLine(chunk[i])
+					station, ok := stationsMap[name]
+					if !ok {
+						stationsMap[name] = &stationData{temp, temp, temp, temp, 1}
+					} else {
+						if temp < station.min {
+							station.min = temp
+						}
+						if temp > station.max {
+							station.max = temp
+						}
+						station.count++
+						station.acc += temp
 					}
-					if temp > station.max {
-						station.max = temp
-					}
-					station.count++
-					station.acc += temp
-					mu.Unlock()
 				}
 			}
-		}(channel)
+			mapsSlice = append(mapsSlice, stationsMap)
+		}(i, chunks)
 	}
 
-	file, err := os.Open(testPath)
+	file, err := os.Open(path)
 	if err != nil {
 		fmt.Println("Error opening file:", err)
 		return
@@ -85,6 +83,9 @@ func main() {
 	}(file)
 
 	reader := bufio.NewReader(file)
+	count := 0
+	countTotal := 0
+	var lines []string
 	for {
 		line, err := reader.ReadString('\n')
 		if err != nil {
@@ -94,13 +95,42 @@ func main() {
 			fmt.Println("Error reading line:", err)
 			return
 		}
-		channel <- line
+		lines = append(lines, line)
+		if count == chunkMaxSize {
+			chunks <- lines
+			if countTotal < totalSize-chunkMaxSize {
+				lines = nil
+				count = 0
+			}
+		}
+		count++
+		countTotal++
 	}
+	parseTime := time.Since(start)
 
-	close(channel)
+	close(chunks)
 	wg.Wait()
 
-	parseTime := time.Since(start)
+	startMerge := time.Now()
+	for i := 0; i < len(mapsSlice); i++ {
+		for name, currentStation := range mapsSlice[i] {
+			stationInMain, ok := mainMap[name]
+			if !ok {
+				mainMap[name] = currentStation
+				keysList = append(keysList, name)
+			} else {
+				if currentStation.min < stationInMain.min {
+					stationInMain.min = currentStation.min
+				}
+				if currentStation.max > stationInMain.max {
+					stationInMain.max = currentStation.max
+				}
+				stationInMain.count++
+				stationInMain.acc += currentStation.acc
+			}
+		}
+	}
+	mergeTime := time.Since(startMerge)
 
 	startSort := time.Now()
 	sort.Strings(keysList)
@@ -108,13 +138,14 @@ func main() {
 
 	startPrinting := time.Now()
 	for i := 0; i < len(keysList); i++ {
-		data := stationsMap[keysList[i]]
+		data := mainMap[keysList[i]]
 		fmt.Println(keysList[i], data.min, data.acc/float32(data.count), data.max)
 	}
 	printingTime := time.Since(startPrinting)
 
 	fmt.Println("\nParse Time : ", parseTime)
 	fmt.Println("Sort Time : ", sortTime)
+	fmt.Println("Merge Time : ", mergeTime)
 	fmt.Println("Printing Time : ", printingTime)
 	fmt.Println("Total Time : ", time.Since(start))
 }
