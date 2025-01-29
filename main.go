@@ -29,25 +29,25 @@ const (
 )
 
 func main() {
-	path := testPath
-	totalSize := twoMillions
+	path := mainPath
+	totalSize := billion
 
-	start := time.Now()
 	countCPUs := runtime.NumCPU()
-	chunkMaxSize := int(math.Floor(float64(totalSize) / float64(countCPUs)))
+	chunkMaxSize := int(math.Floor(float64(totalSize) / float64(countCPUs*2)))
 
 	var mapsSlice []map[string]*stationData
 	var keysList []string
 	var wg sync.WaitGroup
 
-	chunks := make(chan []string, countCPUs)
+	chunks := make(chan []string, 10)
 	mainMap := make(map[string]*stationData)
 
-	for i := 0; i < countCPUs; i++ {
+	start := time.Now()
+	for i := 0; i < 4; i++ {
 		wg.Add(1)
-		stationsMap := make(map[string]*stationData)
-		go func(workerID int, ch <-chan []string) {
+		go func() {
 			defer wg.Done()
+			stationsMap := make(map[string]*stationData)
 			for chunk := range chunks {
 				for i := 0; i < len(chunk); i++ {
 					name, temp := ParseLine(chunk[i])
@@ -67,49 +67,57 @@ func main() {
 				}
 			}
 			mapsSlice = append(mapsSlice, stationsMap)
-		}(i, chunks)
+		}()
 	}
 
-	file, err := os.Open(path)
-	if err != nil {
-		fmt.Println("Error opening file:", err)
-		return
-	}
-	defer func(file *os.File) {
-		err := file.Close()
-		if err != nil {
-			fmt.Println("Error closing file:", err)
-		}
-	}(file)
+	go func() {
+		defer close(chunks)
 
-	reader := bufio.NewReader(file)
-	count := 0
-	countTotal := 0
-	var lines []string
-	for {
-		line, err := reader.ReadString('\n')
+		file, err := os.Open(path)
 		if err != nil {
-			if err == io.EOF {
-				break
-			}
-			fmt.Println("Error reading line:", err)
+			fmt.Println("Error opening file:", err)
 			return
 		}
-		lines = append(lines, line)
-		if count == chunkMaxSize {
-			chunks <- lines
-			if countTotal < totalSize-chunkMaxSize {
-				lines = nil
-				count = 0
+		defer func(file *os.File) {
+			err := file.Close()
+			if err != nil {
+				fmt.Println("Error closing file:", err)
 			}
+		}(file)
+		reader := bufio.NewReader(file)
+		count := 0
+		countTotal := 0
+		lines := make([]string, 0, chunkMaxSize)
+		readStart := time.Now()
+		for {
+			line, err := reader.ReadString('\n')
+			if err != nil {
+				if err == io.EOF {
+					break
+				}
+				fmt.Println("Error reading line:", err)
+				return
+			}
+			lines = lines[:count+1]
+			lines[count] = line
+			count++
+			if count == chunkMaxSize {
+				fmt.Println("-> Sent Chunk... | Time: ", time.Since(readStart))
+				chunks <- lines
+				if countTotal < totalSize-chunkMaxSize {
+					lines = make([]string, 0, chunkMaxSize)
+					count = 0
+				}
+				readStart = time.Now()
+			}
+			countTotal++
 		}
-		count++
-		countTotal++
-	}
-	parseTime := time.Since(start)
+	}()
+	readTime := time.Since(start)
+	startParse := time.Now()
 
-	close(chunks)
 	wg.Wait()
+	parseTime := time.Since(startParse)
 
 	startMerge := time.Now()
 	for i := 0; i < len(mapsSlice); i++ {
@@ -132,21 +140,16 @@ func main() {
 	}
 	mergeTime := time.Since(startMerge)
 
-	startSort := time.Now()
 	sort.Strings(keysList)
-	sortTime := time.Since(startSort)
 
-	startPrinting := time.Now()
 	for i := 0; i < len(keysList); i++ {
 		data := mainMap[keysList[i]]
 		fmt.Println(keysList[i], data.min, data.acc/float32(data.count), data.max)
 	}
-	printingTime := time.Since(startPrinting)
 
-	fmt.Println("\nParse Time : ", parseTime)
-	fmt.Println("Sort Time : ", sortTime)
+	fmt.Println("\nRead Time : ", readTime)
+	fmt.Println("Parse Time : ", parseTime)
 	fmt.Println("Merge Time : ", mergeTime)
-	fmt.Println("Printing Time : ", printingTime)
 	fmt.Println("Total Time : ", time.Since(start))
 }
 
