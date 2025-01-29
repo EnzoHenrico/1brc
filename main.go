@@ -2,13 +2,13 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"fmt"
 	"io"
-	"math"
 	"os"
-	"runtime"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -22,35 +22,31 @@ type stationData struct {
 }
 
 const (
-	mainPath    = "/home/enzohenrico/1brc/measurements.txt"
-	testPath    = "test_data.txt"
-	billion     = 1000000000
-	twoMillions = 2000000
+	mainPath = "/home/enzohenrico/1brc/measurements.txt"
+	testPath = "test_data.txt"
 )
 
 func main() {
 	path := mainPath
-	totalSize := billion
-
-	countCPUs := runtime.NumCPU()
-	chunkMaxSize := int(math.Floor(float64(totalSize) / float64(countCPUs*2)))
 
 	var mapsSlice []map[string]*stationData
 	var keysList []string
 	var wg sync.WaitGroup
 
-	chunks := make(chan []string, 10)
+	chunks := make(chan string, 10)
 	mainMap := make(map[string]*stationData)
 
 	start := time.Now()
-	for i := 0; i < 4; i++ {
+	for i := 0; i < 7; i++ {
 		wg.Add(1)
-		go func() {
+		stationsMap := make(map[string]*stationData)
+		go func(id int) {
+			fmt.Println("Start Worker ID=", id+1)
 			defer wg.Done()
-			stationsMap := make(map[string]*stationData)
 			for chunk := range chunks {
-				for i := 0; i < len(chunk); i++ {
-					name, temp := ParseLine(chunk[i])
+				scanner := bufio.NewScanner(strings.NewReader(chunk))
+				for scanner.Scan() {
+					name, temp := ParseLine(scanner.Text())
 					station, ok := stationsMap[name]
 					if !ok {
 						stationsMap[name] = &stationData{temp, temp, temp, temp, 1}
@@ -66,54 +62,68 @@ func main() {
 					}
 				}
 			}
+			fmt.Println("Finished Parse Chunk, worker ID=", id+1)
 			mapsSlice = append(mapsSlice, stationsMap)
-		}()
+		}(i)
 	}
 
 	go func() {
 		defer close(chunks)
-
 		file, err := os.Open(path)
 		if err != nil {
 			fmt.Println("Error opening file:", err)
 			return
 		}
-		defer func(file *os.File) {
-			err := file.Close()
-			if err != nil {
+		defer func() {
+			if err := file.Close(); err != nil {
 				fmt.Println("Error closing file:", err)
 			}
-		}(file)
+		}()
+
 		reader := bufio.NewReader(file)
-		count := 0
-		countTotal := 0
-		lines := make([]string, 0, chunkMaxSize)
+		chunkSize := 1 << 25
+		buf := make([]byte, chunkSize)
+		var carriedRemaining []byte
+		//var builder strings.Builder
+
 		readStart := time.Now()
 		for {
-			line, err := reader.ReadString('\n')
-			if err != nil {
-				if err == io.EOF {
-					break
+			n, err := io.ReadFull(reader, buf)
+			chunk := buf[:n]
+			if err == io.EOF || err == io.ErrUnexpectedEOF {
+				if len(carriedRemaining) > 0 {
+					chunks <- string(append(carriedRemaining, chunk...))
+				} else {
+					chunks <- string(chunk)
 				}
-				fmt.Println("Error reading line:", err)
+				return
+			} else if err != nil {
+				fmt.Println("Error reading chunk:", err)
 				return
 			}
-			lines = lines[:count+1]
-			lines[count] = line
-			count++
-			if count == chunkMaxSize {
-				fmt.Println("-> Sent Chunk... | Time: ", time.Since(readStart))
-				chunks <- lines
-				if countTotal < totalSize-chunkMaxSize {
-					lines = make([]string, 0, chunkMaxSize)
-					count = 0
-				}
-				readStart = time.Now()
+
+			if len(carriedRemaining) > 0 {
+				chunk = append(carriedRemaining, chunk...)
+				carriedRemaining = nil
 			}
-			countTotal++
+			lastLineBreakIndex := bytes.LastIndexByte(chunk, '\n')
+			if lastLineBreakIndex == -1 {
+				carriedRemaining = append(carriedRemaining, chunk...)
+				continue
+			}
+			chunkData := chunk[:lastLineBreakIndex+1]
+			remaining := chunk[lastLineBreakIndex+1:]
+
+			chunks <- string(chunkData)
+
+			if len(remaining) > 0 {
+				carriedRemaining = append(carriedRemaining, remaining...)
+			}
+
+			fmt.Println("-> Sent Chunk... | Time: ", time.Since(readStart))
+			readStart = time.Now()
 		}
 	}()
-	readTime := time.Since(start)
 	startParse := time.Now()
 
 	wg.Wait()
@@ -141,14 +151,12 @@ func main() {
 	mergeTime := time.Since(startMerge)
 
 	sort.Strings(keysList)
-
 	for i := 0; i < len(keysList); i++ {
 		data := mainMap[keysList[i]]
 		fmt.Println(keysList[i], data.min, data.acc/float32(data.count), data.max)
 	}
 
-	fmt.Println("\nRead Time : ", readTime)
-	fmt.Println("Parse Time : ", parseTime)
+	fmt.Println("\nParse Time : ", parseTime)
 	fmt.Println("Merge Time : ", mergeTime)
 	fmt.Println("Total Time : ", time.Since(start))
 }
