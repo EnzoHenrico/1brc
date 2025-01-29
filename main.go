@@ -22,8 +22,11 @@ type stationData struct {
 }
 
 const (
-	mainPath = "/home/enzohenrico/1brc/measurements.txt"
-	testPath = "test_data.txt"
+	mainPath          = "/home/enzohenrico/1brc/measurements.txt"
+	testPath          = "test_data.txt"
+	chunkSize         = 1 << 25
+	channelBufferSize = 10
+	workersCount      = 7
 )
 
 func main() {
@@ -33,20 +36,19 @@ func main() {
 	var keysList []string
 	var wg sync.WaitGroup
 
-	chunks := make(chan string, 10)
+	chunkChannel := make(chan string, channelBufferSize)
 	mainMap := make(map[string]*stationData)
-
 	start := time.Now()
-	for i := 0; i < 7; i++ {
+
+	for i := 0; i < workersCount; i++ {
 		wg.Add(1)
 		stationsMap := make(map[string]*stationData)
-		go func(id int) {
-			fmt.Println("Start Worker ID=", id+1)
+		go func() {
 			defer wg.Done()
-			for chunk := range chunks {
-				scanner := bufio.NewScanner(strings.NewReader(chunk))
-				for scanner.Scan() {
-					name, temp := ParseLine(scanner.Text())
+			for chunk := range chunkChannel {
+				lines := ParseChunks(chunk)
+				for i := 0; i < len(lines); i++ {
+					name, temp := ParseLine(lines[i])
 					station, ok := stationsMap[name]
 					if !ok {
 						stationsMap[name] = &stationData{temp, temp, temp, temp, 1}
@@ -62,13 +64,12 @@ func main() {
 					}
 				}
 			}
-			fmt.Println("Finished Parse Chunk, worker ID=", id+1)
 			mapsSlice = append(mapsSlice, stationsMap)
-		}(i)
+		}()
 	}
 
 	go func() {
-		defer close(chunks)
+		defer close(chunkChannel)
 		file, err := os.Open(path)
 		if err != nil {
 			fmt.Println("Error opening file:", err)
@@ -81,20 +82,17 @@ func main() {
 		}()
 
 		reader := bufio.NewReader(file)
-		chunkSize := 1 << 25
 		buf := make([]byte, chunkSize)
 		var carriedRemaining []byte
 		//var builder strings.Builder
-
-		readStart := time.Now()
 		for {
 			n, err := io.ReadFull(reader, buf)
 			chunk := buf[:n]
 			if err == io.EOF || err == io.ErrUnexpectedEOF {
 				if len(carriedRemaining) > 0 {
-					chunks <- string(append(carriedRemaining, chunk...))
+					chunkChannel <- string(append(carriedRemaining, chunk...))
 				} else {
-					chunks <- string(chunk)
+					chunkChannel <- string(chunk)
 				}
 				return
 			} else if err != nil {
@@ -114,22 +112,15 @@ func main() {
 			chunkData := chunk[:lastLineBreakIndex+1]
 			remaining := chunk[lastLineBreakIndex+1:]
 
-			chunks <- string(chunkData)
+			chunkChannel <- string(chunkData)
 
 			if len(remaining) > 0 {
 				carriedRemaining = append(carriedRemaining, remaining...)
 			}
-
-			fmt.Println("-> Sent Chunk... | Time: ", time.Since(readStart))
-			readStart = time.Now()
 		}
 	}()
-	startParse := time.Now()
-
 	wg.Wait()
-	parseTime := time.Since(startParse)
 
-	startMerge := time.Now()
 	for i := 0; i < len(mapsSlice); i++ {
 		for name, currentStation := range mapsSlice[i] {
 			stationInMain, ok := mainMap[name]
@@ -148,16 +139,14 @@ func main() {
 			}
 		}
 	}
-	mergeTime := time.Since(startMerge)
 
 	sort.Strings(keysList)
+
 	for i := 0; i < len(keysList); i++ {
 		data := mainMap[keysList[i]]
 		fmt.Println(keysList[i], data.min, data.acc/float32(data.count), data.max)
 	}
 
-	fmt.Println("\nParse Time : ", parseTime)
-	fmt.Println("Merge Time : ", mergeTime)
 	fmt.Println("Total Time : ", time.Since(start))
 }
 
@@ -178,4 +167,23 @@ func ParseLine(line string) (string, float32) {
 	tempFloat, _ := strconv.ParseFloat(tempString, 32)
 
 	return stationName, float32(tempFloat)
+}
+
+func ParseChunks(chunk string) []string {
+	var result []string
+	pos := 0
+	chunkLen := len(chunk)
+	for pos < chunkLen {
+		i := strings.IndexByte(chunk[pos:], '\n')
+		if i < 0 {
+			break
+		}
+		end := pos + i
+		result = append(result, chunk[pos:end])
+		pos = end + 1
+	}
+	if pos < chunkLen {
+		result = append(result, chunk[pos:])
+	}
+	return result
 }
